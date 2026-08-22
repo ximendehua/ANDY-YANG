@@ -44,17 +44,33 @@ Render 后台本身没有语言切换，但**用 Chrome 浏览器整页翻译**�
 - 本机工程已 `git commit`（密钥 `config.json` 已被 `.gitignore` 忽略）。
 
 ## 第一步：推送到 GitHub
-1. 打开 github.com → **New repository** → 名称如 `photo-to-sheet-app`
-   → **不要**勾选 README / .gitignore 等初始化文件（本地已有）→ **Create repository**。
-2. 复制仓库的 HTTPS 地址（形如 `https://github.com/你的名/photo-to-sheet-app.git`）。
-3. 在本机终端执行（把 `<URL>` 换成你的地址）：
+
+> 提示：用 **Chrome 打开 github.com**，空白处右键 → 翻译成中文（简体），整个过程就是中文的。
+
+1. **注册 / 登录**：右上角 **Sign up**（注册）/ **Log in**（登录），免费。
+2. **新建仓库**：点右上角 **+** → **New repository** →
+   Repository name 填 `photo-to-sheet-app` → 可见性 **Public** →
+   **三个初始化选项全部不要勾**（Add README / Add .gitignore / Choose a license，本地已有文件）→
+   点 **Create repository**。
+3. **复制仓库地址**：进仓库后点绿色 **Code** → 选 **HTTPS** → 复制形如
+   `https://github.com/你的名/photo-to-sheet-app.git` 的地址。
+4. **生成访问令牌（PAT）**——这是 push 时要用的"密码"（GitHub 已不支持登录密码推代码）：
+   - 右上角头像 → **Settings** → 页面最底部 **Developer settings**
+     → **Personal access tokens** → **Tokens (classic)** → **Generate new token (classic)**。
+   - Note 随便写（如 `render-deploy`）；Expiration 选 **No expiration**（或 90 days）。
+   - **勾选 `repo` 这一整组**（控制仓库读写）。
+   - 拉到底点 **Generate token** → 复制以 **`ghp_`** 开头的那串（**只显示这一次，存到记事本**）。
+5. **本机推送**（把 `<URL>` 换成第 3 步复制的地址）：
    ```bash
    cd C:\Users\Administrator\WorkBuddy\2026-08-22-14-48-55\photo-to-sheet-app
    git remote add origin <URL>
-   git branch -M main
    git push -u origin main
    ```
-   若提示认证，按 GitHub 指引用浏览器令牌（Personal Access Token）登录即可。
+6. **认证填写**：
+   - 弹窗要 Username → 填你的 **GitHub 用户名**。
+   - 要 Password → **粘贴第 4 步的 `ghp_...` 令牌**（不是登录密码）。
+   - 推送成功后，刷新 GitHub 页面能看到一堆文件；**确认没有 `config.json`**（密钥没泄露）。
+
 
 ## 第二步：Render 一键部署
 1. 打开 render.com → 登录 → 右上角 **New** → **Blueprints**（或 **Web Service**）
