@@ -1,0 +1,6 @@
+# .gitignore
+node_modules/
+config.json
+*.traineddata
+*.log
+.DS_Store

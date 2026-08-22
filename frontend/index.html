@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#2b6cff" />
+  <title>拍照成表</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">📷 拍照成表</div>
+    <div class="sub">手写识别 · 自动存 WPS 表格</div>
+  </header>
+
+  <main class="container">
+    <!-- 1. 拍照 -->
+    <section class="card">
+      <div class="card-title">① 拍摄或选择手写内容</div>
+      <div class="capture" id="captureBox">
+        <img id="preview" class="preview hidden" alt="预览" />
+        <div id="placeholder" class="placeholder">
+          <div class="ph-icon">📸</div>
+          <div>点击拍照 / 从相册选择</div>
+          <div class="ph-tip">建议在光线充足、正面平视下拍摄</div>
+        </div>
+      </div>
+      <input id="fileInput" type="file" accept="image/*" capture="environment" hidden />
+
+      <div class="mode-row">
+        <span class="mode-label">识别模式</span>
+        <div class="seg" id="modeSeg">
+          <button data-mode="auto" class="active">自动</button>
+          <button data-mode="table">格子表格</button>
+          <button data-mode="handwriting">自由手写</button>
+        </div>
+      </div>
+
+      <div class="mode-row">
+        <span class="mode-label">识别引擎</span>
+        <div class="seg" id="engineSeg">
+          <button data-engine="cloud" class="active">云端高精度（推荐）</button>
+          <button data-engine="local">本地体验</button>
+        </div>
+      </div>
+      <p class="hint" id="engineHint">云端高精度：调用腾讯云手写体/表格 OCR，印刷格子表+工整书写下单元格级准确率可达 95–99%，是实现你 96% 要求的唯一可行路径。</p>
+
+      <button id="shootBtn" class="btn primary">拍照 / 选图</button>
+      <button id="recognizeBtn" class="btn" disabled>② 开始识别</button>
+    </section>
+
+    <!-- 2. 结果 -->
+    <section class="card hidden" id="resultCard">
+      <div class="card-title">
+        ③ 核对并修正
+        <span id="modeTag" class="tag"></span>
+        <span id="demoTag" class="tag demo hidden">DEMO</span>
+      </div>
+      <p class="hint" id="hint">红框单元格为低置信度（&lt;90%），请人工复核以保证准确。</p>
+
+      <div class="table-wrap">
+        <table id="resultTable" class="result-table"></table>
+      </div>
+
+      <div class="row-actions">
+        <button id="addRow" class="btn small">＋行</button>
+        <button id="addCol" class="btn small">＋列</button>
+        <button id="delRow" class="btn small ghost">－行</button>
+        <button id="delCol" class="btn small ghost">－列</button>
+      </div>
+
+      <div class="export-row">
+        <button id="saveKdocs" class="btn primary">保存到金山文档</button>
+        <button id="expXls" class="btn">导出 .xls（WPS）</button>
+        <button id="expCsv" class="btn ghost">导出 .csv</button>
+      </div>
+      <div id="status" class="status"></div>
+    </section>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

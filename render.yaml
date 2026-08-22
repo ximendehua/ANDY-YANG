@@ -1,0 +1,25 @@
+# Render.com 免费容器部署配置
+# 部署步骤：
+# 1. 将本仓库推送到 GitHub
+# 2. 在 Render 创建 "New Web Service"，选择该仓库
+# 3. Render 会自动读取 render.yaml
+# 4. 在 Environment 中填入 TENCENT_SECRET_ID / TENCENT_SECRET_KEY（KDOCS_TOKEN 可选）
+# 5. 部署完成后拿到公网 URL，替换前端或直接在浏览器访问
+services:
+  - type: web
+    name: photo-to-sheet-api
+    runtime: docker
+    plan: free
+    envVars:
+      - key: PORT
+        value: "3000"
+      - key: HOST
+        value: "0.0.0.0"
+      - key: TENCENT_SECRET_ID
+        sync: false
+      - key: TENCENT_SECRET_KEY
+        sync: false
+      - key: KDOCS_TOKEN
+        sync: false
+      - key: KDOCS_API_BASE
+        value: "https://www.kdocs.cn"
