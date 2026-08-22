@@ -1,38 +1,37 @@
 'use strict';
-// 云端识别前的图像预处理：自动旋转、对比度拉伸、去噪、二值化。
-// 使用 Jimp 纯 JS 实现，方便部署到 Render 等容器。
+// 云端识别前的图像预处理：仅做安全兜底，避免破坏原图。
+// 腾讯云 OCR（表格/手写体）对灰度/彩色照片识别效果最佳，
+// 过度二值化/中值滤波反而会让手写笔画断裂、产生噪声。
 
 const Jimp = require('jimp');
 
 async function preprocessForCloud(base64Image) {
   let image = await Jimp.read(Buffer.from(base64Image, 'base64'));
 
-  // 1. 根据 EXIF Orientation 自动转正
+  // 1. 裁掉纯黑/纯白外边框，保留 2px 边距
   image = image.autocrop({ leaveBorder: 2 });
 
-  // 2. 限制最大边，既控制大小又保证文字分辨率
-  const maxDim = 2000;
+  // 2. 限制最大边，既控制接口体大小又保证文字分辨率
+  const maxDim = 2400;
   if (image.getWidth() > maxDim || image.getHeight() > maxDim) {
     image.scaleToFit(maxDim, maxDim);
   }
 
-  // 3. 灰度化
+  // 3. 转为灰度（腾讯云对灰度图同样稳定，且能减少彩色干扰）
   image.grayscale();
 
-  // 4. 自动对比度拉伸（histogram stretch）
+  // 4. 自动对比度拉伸（histogram stretch），让淡字变黑、白底更白
   stretchContrast(image);
 
-  // 5. 自适应二值化（Otsu 近似）
-  otsuBinarize(image);
+  // 5. 轻微锐化，提升手写笔画边缘
+  unsharpMask(image, 0.3);
 
-  // 6. 轻微中值去噪（3x3）
-  medianFilter(image, 1);
-
-  const buf = await image.getBufferAsync(Jimp.MIME_JPEG);
+  // 注意：不要再做 Otsu 二值化或中值滤波，会损失灰度细节并引入 JPEG 伪影。
+  const buf = await image.quality(95).getBufferAsync(Jimp.MIME_JPEG);
   return buf.toString('base64');
 }
 
-// 对比度拉伸：把当前 min~max 映射到 0~255
+// 对比度拉伸：把当前 min~max 映射到 5~250，避免纯黑/纯白溢出
 function stretchContrast(image) {
   let min = 255, max = 0;
   image.scan(0, 0, image.bitmap.width, image.bitmap.height, function (x, y, idx) {
@@ -43,79 +42,50 @@ function stretchContrast(image) {
   const range = max - min || 1;
   image.scan(0, 0, image.bitmap.width, image.bitmap.height, function (x, y, idx) {
     const v = this.bitmap.data[idx];
-    const nv = Math.round(((v - min) / range) * 255);
+    const nv = Math.round(((v - min) / range) * 245) + 5;
     this.bitmap.data[idx] = nv;
     this.bitmap.data[idx + 1] = nv;
     this.bitmap.data[idx + 2] = nv;
   });
 }
 
-// Otsu 二值化
-function otsuBinarize(image) {
-  const w = image.bitmap.width;
-  const h = image.bitmap.height;
-  const total = w * h;
-  const hist = new Array(256).fill(0);
-  image.scan(0, 0, w, h, function (x, y, idx) {
-    hist[this.bitmap.data[idx]]++;
-  });
-
-  let sum = 0;
-  for (let i = 0; i < 256; i++) sum += i * hist[i];
-
-  let sumB = 0, wB = 0, wF = 0;
-  let maxVar = 0, threshold = 128;
-  for (let t = 0; t < 256; t++) {
-    wB += hist[t];
-    if (wB === 0) continue;
-    wF = total - wB;
-    if (wF === 0) break;
-    sumB += t * hist[t];
-    const mB = sumB / wB;
-    const mF = (sum - sumB) / wF;
-    const varBetween = wB * wF * (mB - mF) * (mB - mF);
-    if (varBetween > maxVar) {
-      maxVar = varBetween;
-      threshold = t;
-    }
-  }
-
-  image.scan(0, 0, w, h, function (x, y, idx) {
-    const v = this.bitmap.data[idx];
-    const nv = v < threshold ? 0 : 255;
-    this.bitmap.data[idx] = nv;
-    this.bitmap.data[idx + 1] = nv;
-    this.bitmap.data[idx + 2] = nv;
-  });
-}
-
-// 3x3 中值滤波，radius=1
-function medianFilter(image, radius) {
+// 轻微反锐化掩膜：原图 + amount * (原图 - 模糊图)
+function unsharpMask(image, amount) {
   const w = image.bitmap.width;
   const h = image.bitmap.height;
   const src = Buffer.from(image.bitmap.data);
-  const setPixel = (x, y, v) => {
-    const idx = (y * w + x) << 2;
-    image.bitmap.data[idx] = v;
-    image.bitmap.data[idx + 1] = v;
-    image.bitmap.data[idx + 2] = v;
-  };
-  const getPixel = (x, y) => {
-    const idx = (y * w + x) << 2;
-    return src[idx];
-  };
 
-  for (let y = radius; y < h - radius; y++) {
-    for (let x = radius; x < w - radius; x++) {
-      const vals = [];
-      for (let dy = -radius; dy <= radius; dy++) {
-        for (let dx = -radius; dx <= radius; dx++) {
-          vals.push(getPixel(x + dx, y + dy));
-        }
+  // 一维盒式模糊（两次）近似高斯模糊
+  const tmp = Buffer.alloc(w * h);
+  const blurred = Buffer.alloc(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let sum = 0, cnt = 0;
+      for (let k = -1; k <= 1; k++) {
+        const px = x + k;
+        if (px >= 0 && px < w) { sum += src[(y * w + px) << 2]; cnt++; }
       }
-      vals.sort((a, b) => a - b);
-      setPixel(x, y, vals[Math.floor(vals.length / 2)]);
+      tmp[y * w + x] = Math.round(sum / cnt);
     }
+  }
+  for (let x = 0; x < w; x++) {
+    for (let y = 0; y < h; y++) {
+      let sum = 0, cnt = 0;
+      for (let k = -1; k <= 1; k++) {
+        const py = y + k;
+        if (py >= 0 && py < h) { sum += tmp[py * w + x]; cnt++; }
+      }
+      blurred[y * w + x] = Math.round(sum / cnt);
+    }
+  }
+
+  for (let i = 0; i < w * h; i++) {
+    const v = src[i << 2];
+    const nv = Math.round(v + amount * (v - blurred[i]));
+    const val = nv < 0 ? 0 : nv > 255 ? 255 : nv;
+    image.bitmap.data[i << 2] = val;
+    image.bitmap.data[(i << 2) + 1] = val;
+    image.bitmap.data[(i << 2) + 2] = val;
   }
 }
 
