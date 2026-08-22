@@ -6,7 +6,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { recognizeTable, recognizeHandwriting } = require('./tencent-ocr');
-const { parseTableResult, parseHandwritingResult, mergeTableAndHandwriting } = require('./parse');
+const { parseTableResult, parseHandwritingResult, mergeTableAndHandwriting, handwritingLooksReliable } = require('./parse');
 const { saveToKdocs } = require('./wps');
 const { preprocessForCloud } = require('./image-preprocess');
 const demo = require('./demo-data');
@@ -160,8 +160,8 @@ async function handleRecognize(req, res) {
       return sendJSON(res, 200, { ok: true, demo: false, mode: 'table', ...parsed });
     }
 
-    // mode === 'auto'：融合方案（推荐）
-    // 同时调表格 OCR（要结构）和手写体 OCR（要手写数字准确率），再按单元格坐标融合。
+    // mode === 'auto'：优先选手写体 OCR 聚类结果（修复后发现手写编号表结构更准确），
+    // 若手写体 OCR 不可靠，再回退到表格 OCR / 融合方案。
     let tableResp = null;
     let hwResp = null;
     try {
@@ -173,6 +173,13 @@ async function handleRecognize(req, res) {
       hwResp = await recognizeHandwriting(processed, cfg);
     } catch (e) {
       console.log('[info] 手写体识别失败:', e.message);
+    }
+
+    if (hwResp) {
+      const hwParsed = parseHandwritingResult(hwResp);
+      if (handwritingLooksReliable(hwParsed)) {
+        return sendJSON(res, 200, { ok: true, demo: false, mode: 'auto', ...hwParsed });
+      }
     }
 
     if (tableResp && hwResp) {

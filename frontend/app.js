@@ -77,7 +77,7 @@ function setActive(id) {
   if (img.status === 'done' && img.table.length) {
     $('resultCard').classList.remove('hidden');
     renderTable();
-    const modeLabels = { handwriting: '自由手写', table: '格子表格', hybrid: '融合识别' };
+    const modeLabels = { auto: '自动', handwriting: '自由手写', table: '格子表格', hybrid: '融合识别' };
     $('modeTag').textContent = modeLabels[img.mode] || '格子表格';
     $('demoTag').classList.toggle('hidden', !img.demo);
   } else {

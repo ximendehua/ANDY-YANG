@@ -49,7 +49,7 @@ function parseHandwritingResult(resp) {
   // 对手写编号表（每行 1~4 个单元格）重建二维表效果更好。
   const clustered = clusterDetectionsIntoTable(dets);
   if (clustered.table.length && clustered.table.some((r) => r.some((c) => c !== ''))) {
-    return clustered;
+    return normalizeHandwritingTable(clustered);
   }
 
   // 退化：逐行当作一个单元格
@@ -76,6 +76,8 @@ function parseHandwritingResult(resp) {
 }
 
 // 把 TextDetection 行按 y 坐标聚类成行、x 坐标聚类成列
+// 修复：旧版用 y0 > curBottom 判断，导致上下紧挨的行被全部合并成一行。
+// 新版基于 cy 中心点的一维聚类，对手写编号表更稳定。
 function clusterDetectionsIntoTable(dets) {
   const items = dets.map((d) => {
     const poly = d.Polygon || [];
@@ -97,31 +99,34 @@ function clusterDetectionsIntoTable(dets) {
 
   if (!items.length) return { table: [], conf: [], mode: 'handwriting' };
 
+  // 按垂直中心排序
   items.sort((a, b) => a.cy - b.cy);
 
-  // 行聚类：如果两行在 y 方向上几乎不重叠且间隙较大，才拆成新行
-  const rowGroups = [];
-  let cur = [items[0]];
-  let curBottom = items[0].y1;
+  // 行聚类：相邻 cy 间距 > 0.6 倍字高则认为换行
+  const heights = items.map((i) => i.h).filter((h) => h > 0);
+  const medianH = median(heights) || 20;
+  const rowGap = medianH * 0.6;
+
+  const rowGroups = [[items[0]]];
+  let lastCy = items[0].cy;
   for (let i = 1; i < items.length; i++) {
     const it = items[i];
-    const minH = Math.min(curBottom - Math.min(...cur.map((c) => c.y0)), it.h);
-    const gap = it.y0 - curBottom;
-    if (gap > minH * 0.35 && it.y0 > curBottom) {
-      rowGroups.push(cur);
-      cur = [it];
-      curBottom = it.y1;
+    if (it.cy - lastCy > rowGap) {
+      rowGroups.push([it]);
     } else {
-      cur.push(it);
-      curBottom = Math.max(curBottom, it.y1);
+      rowGroups[rowGroups.length - 1].push(it);
     }
+    lastCy = it.cy;
   }
-  rowGroups.push(cur);
 
-  // 列模板：用列数最多的上行（通常是表头）确定各列中心
-  const rowsWithCols = rowGroups.map((rg) => rg.slice().sort((a, b) => a.cx - b.cx));
-  const headerRow = rowsWithCols.reduce((best, rg) => (rg.length > best.length ? rg : best), rowsWithCols[0]);
-  const colCenters = headerRow.map((it) => it.cx);
+  // 列聚类：用全局 x 中心一维聚类，避免被某一行列数误导。
+  // 阈值根据所有相邻中心点间隙的中位数自适应，列间大间隙会被分开。
+  const xs = items.map((i) => i.cx).sort((a, b) => a - b);
+  const gaps = [];
+  for (let i = 1; i < xs.length; i++) gaps.push(xs[i] - xs[i - 1]);
+  const medianGap = median(gaps) || 20;
+  const colGap = Math.max(medianGap * 1.3, 16);
+  const colCenters = cluster1D(items.map((i) => i.cx), colGap);
   const colCount = colCenters.length;
 
   items.forEach((it) => {
@@ -145,11 +150,81 @@ function clusterDetectionsIntoTable(dets) {
       cells[it.col].texts.push(it.text);
       cells[it.col].confs.push(it.conf);
     }
-    table.push(cells.map((c) => c.texts.join(' ')));
+    table.push(cells.map((c) => c.texts.join('')));
     conf.push(cells.map((c) => (c.confs.length ? Math.round(c.confs.reduce((a, b) => a + b, 0) / c.confs.length) : null)));
   }
 
   return { table: postProcessTable(trimMatrix(table)), conf: trimMatrix(conf), mode: 'handwriting' };
+}
+
+// 常见表头关键词，用于定位表头行和判断手写体 OCR 结构是否可靠
+const HEADER_KEYWORDS = ['规格型号', '外圈号', '内圈号', '备注', '型号', '数量', '日期', '序号', '名称', '单位', '单价', '金额'];
+
+// 手写体 OCR 聚类后常夹杂表格外文字（如左上角编号、标题），且会产生多余空列。
+// 本函数：定位表头行 → 删除表头前游离行 → 只保留表头非空列。
+function normalizeHandwritingTable(parsed) {
+  let { table, conf, mode } = parsed;
+  if (!table.length) return parsed;
+
+  // 1. 找表头行
+  let headerIdx = -1;
+  let headerScore = 0;
+  for (let r = 0; r < table.length; r++) {
+    let score = 0;
+    for (const cell of table[r]) {
+      if (!cell) continue;
+      for (const kw of HEADER_KEYWORDS) {
+        if (cell.includes(kw)) score++;
+      }
+    }
+    if (score > headerScore) {
+      headerScore = score;
+      headerIdx = r;
+    }
+  }
+
+  // 2. 删除表头之前的行
+  const startRow = headerIdx > 0 ? headerIdx : 0;
+
+  // 3. 确定保留哪些列：以表头行的非空列为锚点
+  const keepCols = [];
+  if (headerIdx >= 0) {
+    const headerRow = table[headerIdx];
+    for (let c = 0; c < headerRow.length; c++) {
+      if (headerRow[c] && headerRow[c].trim()) keepCols.push(c);
+    }
+  }
+  // 兜底：删除全空列
+  if (!keepCols.length) {
+    for (let c = 0; c < table[0].length; c++) {
+      if (table.slice(startRow).some((row) => row[c] && row[c].trim())) keepCols.push(c);
+    }
+  }
+
+  // 4. 重建表格
+  const newTable = [];
+  const newConf = [];
+  for (let r = startRow; r < table.length; r++) {
+    newTable.push(keepCols.map((c) => table[r][c] || ''));
+    newConf.push(keepCols.map((c) => (conf[r] ? conf[r][c] : null)));
+  }
+
+  return { table: postProcessTable(trimMatrix(newTable)), conf: trimMatrix(newConf), mode };
+}
+
+// 判断手写体 OCR 聚类结果是否看起来可靠（能识别到表头关键词）
+function handwritingLooksReliable(parsed) {
+  const table = parsed.table || [];
+  if (table.length < 2) return false;
+  for (const row of table) {
+    for (const cell of row) {
+      if (!cell) continue;
+      for (const kw of HEADER_KEYWORDS) {
+        if (cell.includes(kw)) return true;
+      }
+    }
+  }
+  return false;
 }
 
 // 一维聚类：把相近的值合并成一列/一行中心
@@ -412,4 +487,4 @@ function pointInPolygon(x, y, poly) {
   return inside;
 }
 
-module.exports = { parseTableResult, parseHandwritingResult, mergeTableAndHandwriting };
+module.exports = { parseTableResult, parseHandwritingResult, mergeTableAndHandwriting, handwritingLooksReliable };
