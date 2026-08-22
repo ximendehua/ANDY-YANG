@@ -47,11 +47,21 @@ function renderImgList() {
   images.forEach((img) => {
     const el = document.createElement('div');
     el.className = 'img-item' + (img.id === activeId ? ' active' : '');
+    const showRetry = img.status === 'done' || img.status === 'error';
     el.innerHTML =
-      '<div class="img-thumb"><img src="' + img.dataUrl + '" alt=""/></div>' +
+      '<div class="img-thumb"><img src="' + img.dataUrl + '" alt=""/>' +
+      (showRetry ? '<div class="img-retry" title="重新识别" data-rid="' + img.id + '">↻</div>' : '') +
+      '</div>' +
       '<div class="img-meta"><div class="img-name">' + escapeHtml(img.name) + '</div>' +
       '<div class="img-state ' + img.status + '">' + (stateMap[img.status] || img.status) + '</div></div>';
     el.addEventListener('click', () => setActive(img.id));
+    const retry = el.querySelector('.img-retry');
+    if (retry) {
+      retry.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        recognizeOne(img);
+      });
+    }
     box.appendChild(el);
   });
 }
@@ -66,6 +76,7 @@ function setActive(id) {
   renderImgList();
   if (img.status === 'done' && img.table.length) {
     $('resultCard').classList.remove('hidden');
+    renderTable();
     const modeLabels = { handwriting: '自由手写', table: '格子表格', hybrid: '融合识别' };
     $('modeTag').textContent = modeLabels[img.mode] || '格子表格';
     $('demoTag').classList.toggle('hidden', !img.demo);
@@ -237,37 +248,56 @@ function boxBlur(src, w, h, radius) {
   return out;
 }
 
+// ---------- 单张识别 ----------
+async function recognizeOne(img) {
+  img.status = 'processing';
+  renderImgList();
+  setActive(img.id);
+  setStatus('正在识别「' + img.name + '」…', '');
+  try {
+    const b64 = await preprocessImage(img.dataUrl);
+    let data;
+    if (currentEngine === 'local') data = await localRecognize(b64);
+    else data = await cloudRecognize(b64);
+    img.table = data.table || [];
+    img.conf = data.conf || [];
+    img.mode = data.mode;
+    img.demo = data.demo;
+    img.local = data.local;
+    img.status = 'done';
+    setStatus('「' + img.name + '」识别完成', 'ok');
+    return true;
+  } catch (err) {
+    img.status = 'error';
+    img.err = err.message;
+    setStatus('「' + img.name + '」识别失败：' + err.message, 'err');
+    return false;
+  } finally {
+    renderImgList();
+    setActive(img.id);
+  }
+}
+
 // ---------- 识别 ----------
 $('recognizeBtn').addEventListener('click', async () => {
-  const targets = images.filter((i) => i.status === 'pending' || i.status === 'error');
+  let targets = images.filter((i) => i.status === 'pending' || i.status === 'error');
   if (!targets.length) {
-    setStatus('没有待识别的图片。如需重新识别请刷新页面重新导入。', '');
-    return;
+    if (images.every((i) => i.status === 'done')) {
+      const go = window.confirm('所有图片已识别完成，是否要全部重新识别？');
+      if (!go) {
+        setStatus('所有图片已识别完成。点击缩略图右上角 ↻ 可单张重新识别。', 'ok');
+        return;
+      }
+      targets = [...images];
+    } else {
+      setStatus('没有待识别的图片。', '');
+      return;
+    }
   }
   $('recognizeBtn').disabled = true;
   let ok = 0;
-  for (let idx = 0; idx < targets.length; idx++) {
-    const img = targets[idx];
-    img.status = 'processing';
-    setActive(img.id);
-    setStatus('正在识别第 ' + (idx + 1) + ' / ' + targets.length + ' 张…', '');
-    try {
-      const b64 = await preprocessImage(img.dataUrl);
-      let data;
-      if (currentEngine === 'local') data = await localRecognize(b64);
-      else data = await cloudRecognize(b64);
-      img.table = data.table || [];
-      img.conf = data.conf || [];
-      img.mode = data.mode;
-      img.demo = data.demo;
-      img.local = data.local;
-      img.status = 'done';
-      ok++;
-    } catch (err) {
-      img.status = 'error';
-      img.err = err.message;
-    }
-    setActive(img.id);
+  for (const img of targets) {
+    if (await recognizeOne(img)) ok++;
   }
   $('recognizeBtn').disabled = false;
   const doneImgs = images.filter((i) => i.status === 'done');
