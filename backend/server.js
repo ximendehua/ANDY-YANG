@@ -6,7 +6,7 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { recognizeTable, recognizeHandwriting } = require('./tencent-ocr');
-const { parseTableResult, parseHandwritingResult, mergeTableAndHandwriting, handwritingLooksReliable } = require('./parse');
+const { parseTableResult, parseHandwritingResult, mergeTableAndHandwriting, handwritingLooksReliable, fillBlanksFromTable, fixLeadingDigitDrop, fixColumnDigitLength } = require('./parse');
 const { saveToKdocs } = require('./wps');
 const { preprocessForCloud } = require('./image-preprocess');
 const demo = require('./demo-data');
@@ -178,7 +178,16 @@ async function handleRecognize(req, res) {
     if (hwResp) {
       const hwParsed = parseHandwritingResult(hwResp);
       if (handwritingLooksReliable(hwParsed)) {
-        return sendJSON(res, 200, { ok: true, demo: false, mode: 'auto', ...hwParsed });
+        // 手写体 OCR 对单个淡字/小字可能漏检，用表格 OCR 的坐标对齐结果填补空白格。
+        // 同时修正漏检首位数字的情况（如 19195 → 9195）。
+        if (tableResp && hwParsed.cellBoxes) {
+          fillBlanksFromTable(hwParsed, tableResp);
+          fixLeadingDigitDrop(hwParsed, tableResp);
+          fixColumnDigitLength(hwParsed);
+        }
+        // cellBoxes 是内部坐标，不返回给前端
+        const { cellBoxes, ...out } = hwParsed;
+        return sendJSON(res, 200, { ok: true, demo: false, mode: 'auto', ...out });
       }
     }
 

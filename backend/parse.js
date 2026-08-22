@@ -79,7 +79,7 @@ function parseHandwritingResult(resp) {
 // 修复：旧版用 y0 > curBottom 判断，导致上下紧挨的行被全部合并成一行。
 // 新版基于 cy 中心点的一维聚类，对手写编号表更稳定。
 function clusterDetectionsIntoTable(dets) {
-  const items = dets.map((d) => {
+  let items = dets.map((d) => {
     const poly = d.Polygon || [];
     const xs = poly.map((p) => p.X);
     const ys = poly.map((p) => p.Y);
@@ -94,18 +94,27 @@ function clusterDetectionsIntoTable(dets) {
       cx: (x0 + x1) / 2,
       cy: (y0 + y1) / 2,
       h: y1 - y0,
+      w: x1 - x0,
     };
   }).filter((i) => i.text);
 
   if (!items.length) return { table: [], conf: [], mode: 'handwriting' };
 
+  // 预处理：腾讯云手写体 OCR 偶尔会把左右/上下相邻的两个单元格数字合并成一串超长数字。
+  // 例如 "18679"(规格型号列) 和 "19178"(外圈号列) 被合并为 "1867919178"。
+  // 对明显超宽（>1.6倍中位宽）且纯数字长度≥8的检测框，按字符数中点拆成两个候选。
+  items = splitMergedNumberDetections(items);
+
   // 按垂直中心排序
   items.sort((a, b) => a.cy - b.cy);
 
-  // 行聚类：相邻 cy 间距 > 0.6 倍字高则认为换行
-  const heights = items.map((i) => i.h).filter((h) => h > 0);
-  const medianH = median(heights) || 20;
-  const rowGap = medianH * 0.6;
+  // 行聚类：基于相邻 cy 间距的"突变"分行。
+  // 表格内同一行文字的 cy 差通常只有 0~5px，而不同行之间至少 15px 以上。
+  // 用 medianGap*2.5 并设置下限 15px，可稳定把各行分开，又不把同一行轻微错位的字拆开。
+  const rowGaps = [];
+  for (let i = 1; i < items.length; i++) rowGaps.push(items[i].cy - items[i - 1].cy);
+  const medianRowGap = median(rowGaps) || 5;
+  const rowGap = Math.max(medianRowGap * 2.5, 15);
 
   const rowGroups = [[items[0]]];
   let lastCy = items[0].cy;
@@ -144,17 +153,27 @@ function clusterDetectionsIntoTable(dets) {
 
   const table = [];
   const conf = [];
+  const cellBoxes = [];
   for (const rg of rowGroups) {
-    const cells = Array.from({ length: colCount }, () => ({ texts: [], confs: [] }));
+    const cells = Array.from({ length: colCount }, () => ({ texts: [], confs: [], boxes: [] }));
     for (const it of rg) {
       cells[it.col].texts.push(it.text);
       cells[it.col].confs.push(it.conf);
+      cells[it.col].boxes.push(it);
     }
     table.push(cells.map((c) => c.texts.join('')));
     conf.push(cells.map((c) => (c.confs.length ? Math.round(c.confs.reduce((a, b) => a + b, 0) / c.confs.length) : null)));
+    cellBoxes.push(cells.map((c) => {
+      if (!c.boxes.length) return null;
+      const x0 = Math.min(...c.boxes.map((b) => b.x0));
+      const x1 = Math.max(...c.boxes.map((b) => b.x1));
+      const y0 = Math.min(...c.boxes.map((b) => b.y0));
+      const y1 = Math.max(...c.boxes.map((b) => b.y1));
+      return { x0, x1, y0, y1, cx: (x0 + x1) / 2, cy: (y0 + y1) / 2 };
+    }));
   }
 
-  return { table: postProcessTable(trimMatrix(table)), conf: trimMatrix(conf), mode: 'handwriting' };
+  return { table: postProcessTable(trimMatrix(table)), conf: trimMatrix(conf), cellBoxes: trimMatrix(cellBoxes), mode: 'handwriting' };
 }
 
 // 常见表头关键词，用于定位表头行和判断手写体 OCR 结构是否可靠
@@ -163,7 +182,7 @@ const HEADER_KEYWORDS = ['规格型号', '外圈号', '内圈号', '备注', '�
 // 手写体 OCR 聚类后常夹杂表格外文字（如左上角编号、标题），且会产生多余空列。
 // 本函数：定位表头行 → 删除表头前游离行 → 只保留表头非空列。
 function normalizeHandwritingTable(parsed) {
-  let { table, conf, mode } = parsed;
+  let { table, conf, mode, cellBoxes } = parsed;
   if (!table.length) return parsed;
 
   // 1. 找表头行
@@ -204,12 +223,82 @@ function normalizeHandwritingTable(parsed) {
   // 4. 重建表格
   const newTable = [];
   const newConf = [];
+  const newCellBoxes = [];
   for (let r = startRow; r < table.length; r++) {
     newTable.push(keepCols.map((c) => table[r][c] || ''));
     newConf.push(keepCols.map((c) => (conf[r] ? conf[r][c] : null)));
+    newCellBoxes.push(keepCols.map((c) => (cellBoxes && cellBoxes[r] ? cellBoxes[r][c] : null)));
   }
 
-  return { table: postProcessTable(trimMatrix(newTable)), conf: trimMatrix(newConf), mode };
+  return { table: postProcessTable(trimMatrix(newTable)), conf: trimMatrix(newConf), cellBoxes: trimMatrix(newCellBoxes), mode };
+}
+
+// 拆分被手写体 OCR 错误合并的相邻单元格数字。
+// 场景 A（左右合并）：两个同行单元格被框在一起，如 "18679"+"19178" → "1867919178"。
+//   特征：纯数字、长度≥8、宽度明显超过同列中位宽（>1.6 倍）。
+// 场景 B（上下合并）：两个同列相邻行被框在一起，如 "18663"+"18779" → "1866318779"。
+//   特征：纯数字、长度≥8、宽度正常但高度/长度异常。
+// 拆分时按字符数中点切开，并分别赋予合理的中心坐标，便于后续行/列聚类。
+function splitMergedNumberDetections(items) {
+  const widths = items.map((i) => i.w).filter((w) => w > 0);
+  const medianW = median(widths) || 70;
+  const heights = items.map((i) => i.h).filter((h) => h > 0);
+  const medianH = median(heights) || 35;
+
+  // 临时列中心，用于判断左右/上下合并
+  const colCenters = cluster1D(items.map((i) => i.cx), medianW * 0.8);
+  const colGroups = colCenters.map(() => []);
+  for (const it of items) {
+    let best = 0;
+    let bestD = Infinity;
+    colCenters.forEach((c, idx) => {
+      const d = Math.abs(c - it.cx);
+      if (d < bestD) {
+        bestD = d;
+        best = idx;
+      }
+    });
+    it.col = best;
+    colGroups[best].push(it);
+  }
+
+  const out = [];
+  for (const it of items) {
+    const text = it.text || '';
+    if (!/^\d{8,}$/.test(text)) {
+      out.push(it);
+      continue;
+    }
+
+    const sameColItems = colGroups[it.col] || [];
+    const sameColWidths = sameColItems.map((i) => i.w).filter((w) => w > 0);
+    const colMedianW = median(sameColWidths) || medianW;
+
+    // 场景 A：超宽 → 左右拆分
+    if (it.w > colMedianW * 1.6) {
+      const mid = Math.floor(text.length / 2);
+      const left = { ...it, text: text.slice(0, mid), x1: it.cx, cx: (it.x0 + it.cx) / 2 };
+      const right = { ...it, text: text.slice(mid), x0: it.cx, cx: (it.cx + it.x1) / 2 };
+      left.w = left.cx - left.x0;
+      right.w = right.x1 - right.cx;
+      out.push(left, right);
+      continue;
+    }
+
+    // 场景 B：高度异常 或 数字长度≥9（表格里极少有真 9 位以上编号）→ 上下拆分
+    if (it.h > medianH * 1.3 || text.length >= 9) {
+      const mid = Math.floor(text.length / 2);
+      const top = { ...it, text: text.slice(0, mid), y1: it.cy, cy: (it.y0 + it.cy) / 2 };
+      const bottom = { ...it, text: text.slice(mid), y0: it.cy, cy: (it.cy + it.y1) / 2 };
+      top.h = top.cy - top.y0;
+      bottom.h = bottom.y1 - bottom.cy;
+      out.push(top, bottom);
+      continue;
+    }
+
+    out.push(it);
+  }
+  return out;
 }
 
 // 判断手写体 OCR 聚类结果是否看起来可靠（能识别到表头关键词）
@@ -225,6 +314,133 @@ function handwritingLooksReliable(parsed) {
     }
   }
   return false;
+}
+
+// 当手写体 OCR 漏检某个单元格时，用表格 OCR 的单元格内容按坐标兜底填补。
+// 只填补空白格，已有手写体结果的格不会被覆盖；表头行不补（手写体表头已较准）。
+function fillBlanksFromTable(hwParsed, tableResp) {
+  if (!hwParsed || !hwParsed.cellBoxes || !hwParsed.table.length) return;
+  const detections = (tableResp && tableResp.TableDetections) || [];
+  let cells = [];
+  for (const t of detections) {
+    if (t && Array.isArray(t.Cells)) cells = cells.concat(t.Cells);
+  }
+  if (!cells.length) return;
+
+  const table = hwParsed.table;
+  const conf = hwParsed.conf;
+  const boxes = hwParsed.cellBoxes;
+
+  for (const c of cells) {
+    const text = (c.Text || '').trim();
+    if (!text) continue;
+    const rowIdx = c.RowTl || 0;
+    if (rowIdx === 0) continue; // 表头行不补
+
+    const poly = c.Polygon || [];
+    if (!poly.length) continue;
+    const cx = poly.reduce((s, p) => s + (p.X || 0), 0) / poly.length;
+    const cy = poly.reduce((s, p) => s + (p.Y || 0), 0) / poly.length;
+
+    let bestR = -1;
+    let bestC = -1;
+    let bestD = Infinity;
+    for (let r = 0; r < boxes.length; r++) {
+      for (let col = 0; col < boxes[r].length; col++) {
+        const b = boxes[r][col];
+        if (!b) continue;
+        const d = Math.hypot(b.cx - cx, b.cy - cy);
+        if (d < bestD) {
+          bestD = d;
+          bestR = r;
+          bestC = col;
+        }
+      }
+    }
+
+    // 距离阈值：不超过平均字高的 2.5 倍，避免跨行误填
+    if (bestR >= 0 && bestC >= 0 && bestD < 120) {
+      if (!table[bestR][bestC] || !table[bestR][bestC].trim()) {
+        table[bestR][bestC] = text;
+        conf[bestR][bestC] = typeof c.Confidence === 'number' ? c.Confidence : 70;
+      }
+    }
+  }
+}
+
+// 手写体 OCR 偶尔会漏检首位数字（如把 "19195" 识别成 "9195"）。
+// 若表格 OCR 对应单元格是 "1xxxx" 且手写体结果是其后 4 位，则补回前导 1。
+function fixLeadingDigitDrop(hwParsed, tableResp) {
+  if (!hwParsed || !hwParsed.table.length || !hwParsed.cellBoxes) return;
+  const detections = (tableResp && tableResp.TableDetections) || [];
+  let cells = [];
+  for (const t of detections) {
+    if (t && Array.isArray(t.Cells)) cells = cells.concat(t.Cells);
+  }
+  if (!cells.length) return;
+
+  const table = hwParsed.table;
+  const conf = hwParsed.conf;
+  const boxes = hwParsed.cellBoxes;
+
+  for (let r = 0; r < table.length; r++) {
+    for (let c = 0; c < table[r].length; c++) {
+      const text = table[r][c];
+      if (!text || !/^\d{3,4}$/.test(text)) continue;
+      const b = boxes[r] ? boxes[r][c] : null;
+      if (!b) continue;
+
+      let bestCell = null;
+      let bestD = Infinity;
+      for (const cell of cells) {
+        const poly = cell.Polygon || [];
+        if (!poly.length) continue;
+        const cx = poly.reduce((s, p) => s + (p.X || 0), 0) / poly.length;
+        const cy = poly.reduce((s, p) => s + (p.Y || 0), 0) / poly.length;
+        const d = Math.hypot(b.cx - cx, b.cy - cy);
+        if (d < bestD) {
+          bestD = d;
+          bestCell = cell;
+        }
+      }
+
+      if (bestCell && bestD < 120) {
+        const cellText = (bestCell.Text || '').trim();
+        const m = cellText.match(/^1(\d{3,4})$/);
+        if (m && m[1] === text) {
+          table[r][c] = cellText;
+          conf[r][c] = typeof bestCell.Confidence === 'number' ? bestCell.Confidence : 80;
+        }
+      }
+    }
+  }
+}
+
+// 列级长度修正：若某列大多数单元格都是 n 位数字，而个别单元格是 n-1 位且以 6/8/9 开头，
+// 则极有可能是首位 1 被漏检，补回前导 1。这对手写编号表常见。
+function fixColumnDigitLength(hwParsed) {
+  if (!hwParsed || !hwParsed.table.length) return;
+  const table = hwParsed.table;
+  const conf = hwParsed.conf;
+  const cols = table[0].length;
+  for (let c = 0; c < cols; c++) {
+    const lengths = [];
+    for (let r = 1; r < table.length; r++) {
+      const text = table[r][c];
+      if (text && /^\d+$/.test(text)) lengths.push(text.length);
+    }
+    if (!lengths.length) continue;
+    lengths.sort((a, b) => a - b);
+    const medianLen = lengths[Math.floor(lengths.length / 2)];
+    if (medianLen <= 3) continue;
+    for (let r = 1; r < table.length; r++) {
+      const text = table[r][c];
+      if (text && /^\d+$/.test(text) && text.length === medianLen - 1 && /^[689]/.test(text)) {
+        table[r][c] = '1' + text;
+        if (typeof conf[r][c] === 'number') conf[r][c] = Math.min(conf[r][c], 80);
+      }
+    }
+  }
 }
 
 // 一维聚类：把相近的值合并成一列/一行中心
@@ -487,4 +703,4 @@ function pointInPolygon(x, y, poly) {
   return inside;
 }
 
-module.exports = { parseTableResult, parseHandwritingResult, mergeTableAndHandwriting, handwritingLooksReliable };
+module.exports = { parseTableResult, parseHandwritingResult, mergeTableAndHandwriting, handwritingLooksReliable, fillBlanksFromTable, fixLeadingDigitDrop, fixColumnDigitLength };
