@@ -21,11 +21,13 @@
         <img id="preview" class="preview hidden" alt="预览" />
         <div id="placeholder" class="placeholder">
           <div class="ph-icon">📸</div>
-          <div>点击拍照 / 从相册选择</div>
+          <div>点击批量选择图片（可多选）</div>
           <div class="ph-tip">建议在光线充足、正面平视下拍摄</div>
         </div>
       </div>
-      <input id="fileInput" type="file" accept="image/*" capture="environment" hidden />
+      <input id="fileInput" type="file" accept="image/*" multiple hidden />
+
+      <div id="imgList" class="img-list hidden"></div>
 
       <div class="mode-row">
         <span class="mode-label">识别模式</span>

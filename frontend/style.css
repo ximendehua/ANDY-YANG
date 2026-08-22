@@ -103,3 +103,20 @@ body {
 .status.ok { color: #1a9e57; }
 .status.err { color: var(--red); }
 .status a { color: var(--blue); }
+
+/* ---------- 多图列表 ---------- */
+.img-list { display: flex; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
+.img-item {
+  width: 84px; border: 2px solid var(--border); border-radius: 10px; overflow: hidden;
+  background: #fff; cursor: pointer; transition: border-color .15s;
+}
+.img-item.active { border-color: var(--blue); }
+.img-thumb { width: 100%; aspect-ratio: 1 / 1; background: #eef1f6; }
+.img-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.img-meta { padding: 4px 6px; }
+.img-name { font-size: 11px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.img-state { font-size: 10px; margin-top: 2px; }
+.img-state.pending { color: var(--muted); }
+.img-state.processing { color: var(--blue); }
+.img-state.done { color: #1a9e57; }
+.img-state.error { color: var(--red); }

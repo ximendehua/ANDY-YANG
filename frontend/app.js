@@ -4,27 +4,75 @@
 const $ = (id) => document.getElementById(id);
 let currentMode = 'auto';
 let currentEngine = 'cloud'; // 'cloud' 云端高精度（推荐）/ 'local' 本地体验
-let tableData = []; // 二维数组
+let tableData = []; // 二维数组（当前激活图）
 let confData = []; // 二维置信度（可为空）
 let backendAvailable = true; // 是否为本地 Node 服务（非纯静态托管）
+let images = [];        // 多图：{id,name,dataUrl,table,conf,status,mode,demo,local,err}
+let activeId = null;    // 当前查看/编辑的图片 id
+let imgSeq = 0;
 
 // ---------- 选择/拍照 ----------
 $('captureBox').addEventListener('click', () => $('fileInput').click());
 $('shootBtn').addEventListener('click', () => $('fileInput').click());
 $('fileInput').addEventListener('change', (e) => {
-  const file = e.target.files && e.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = () => {
-    const dataUrl = reader.result;
-    $('preview').src = dataUrl;
-    $('preview').classList.remove('hidden');
-    $('placeholder').classList.add('hidden');
-    window.__rawDataUrl = dataUrl;
-    $('recognizeBtn').disabled = false;
-  };
-  reader.readAsDataURL(file);
+  const files = Array.from(e.target.files || []);
+  if (!files.length) return;
+  files.forEach((file) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = {
+        id: ++imgSeq,
+        name: file.name || ('图片' + imgSeq),
+        dataUrl: reader.result,
+        table: [],
+        conf: [],
+        status: 'pending', // pending | processing | done | error
+      };
+      images.push(img);
+      renderImgList();
+      setActive(img.id);
+      $('recognizeBtn').disabled = false;
+    };
+    reader.readAsDataURL(file);
+  });
+  e.target.value = ''; // 允许再次选择同一文件
 });
+
+// ---------- 图片列表（多图） ----------
+function renderImgList() {
+  const box = $('imgList');
+  box.classList.remove('hidden');
+  box.innerHTML = '';
+  const stateMap = { pending: '待识别', processing: '识别中', done: '已识别', error: '失败' };
+  images.forEach((img) => {
+    const el = document.createElement('div');
+    el.className = 'img-item' + (img.id === activeId ? ' active' : '');
+    el.innerHTML =
+      '<div class="img-thumb"><img src="' + img.dataUrl + '" alt=""/></div>' +
+      '<div class="img-meta"><div class="img-name">' + escapeHtml(img.name) + '</div>' +
+      '<div class="img-state ' + img.status + '">' + (stateMap[img.status] || img.status) + '</div></div>';
+    el.addEventListener('click', () => setActive(img.id));
+    box.appendChild(el);
+  });
+}
+
+// 切换当前查看/编辑的图片（tableData/confData 直接引用该图的数组，编辑即同步）
+function setActive(id) {
+  activeId = id;
+  const img = images.find((i) => i.id === id);
+  if (!img) return;
+  tableData = img.table;
+  confData = img.conf;
+  renderImgList();
+  if (img.status === 'done' && img.table.length) {
+    $('resultCard').classList.remove('hidden');
+    const modeLabels = { handwriting: '自由手写', table: '格子表格', hybrid: '融合识别' };
+    $('modeTag').textContent = modeLabels[img.mode] || '格子表格';
+    $('demoTag').classList.toggle('hidden', !img.demo);
+  } else {
+    $('resultCard').classList.add('hidden');
+  }
+}
 
 // ---------- 模式切换 ----------
 $('modeSeg').addEventListener('click', (e) => {
@@ -191,35 +239,43 @@ function boxBlur(src, w, h, radius) {
 
 // ---------- 识别 ----------
 $('recognizeBtn').addEventListener('click', async () => {
-  if (!window.__rawDataUrl) return;
-  setStatus('正在识别…', '');
+  const targets = images.filter((i) => i.status === 'pending' || i.status === 'error');
+  if (!targets.length) {
+    setStatus('没有待识别的图片。如需重新识别请刷新页面重新导入。', '');
+    return;
+  }
   $('recognizeBtn').disabled = true;
-  try {
-    const b64 = await preprocessImage(window.__rawDataUrl);
-    let data;
-    if (currentEngine === 'local') {
-      data = await localRecognize(b64);
-    } else {
-      data = await cloudRecognize(b64);
+  let ok = 0;
+  for (let idx = 0; idx < targets.length; idx++) {
+    const img = targets[idx];
+    img.status = 'processing';
+    setActive(img.id);
+    setStatus('正在识别第 ' + (idx + 1) + ' / ' + targets.length + ' 张…', '');
+    try {
+      const b64 = await preprocessImage(img.dataUrl);
+      let data;
+      if (currentEngine === 'local') data = await localRecognize(b64);
+      else data = await cloudRecognize(b64);
+      img.table = data.table || [];
+      img.conf = data.conf || [];
+      img.mode = data.mode;
+      img.demo = data.demo;
+      img.local = data.local;
+      img.status = 'done';
+      ok++;
+    } catch (err) {
+      img.status = 'error';
+      img.err = err.message;
     }
-    tableData = data.table || [];
-    confData = data.conf || [];
-    renderTable();
-    $('resultCard').classList.remove('hidden');
-    const modeLabels = { handwriting: '自由手写', table: '格子表格', hybrid: '融合识别' };
-    $('modeTag').textContent = modeLabels[data.mode] || '格子表格';
-    $('demoTag').classList.toggle('hidden', !data.demo);
-    if (data.local) {
-      setStatus('本地免费识别完成（零费用）。手写体请重点核对红框单元格以保证准确。', 'ok');
-    } else if (data.demo) {
-      setStatus('DEMO 示例数据（未配置腾讯云密钥）', '');
-    } else {
-      setStatus('识别完成，请核对红框单元格。', 'ok');
-    }
-  } catch (e) {
-    setStatus('识别失败：' + e.message, 'err');
-  } finally {
-    $('recognizeBtn').disabled = false;
+    setActive(img.id);
+  }
+  $('recognizeBtn').disabled = false;
+  const doneImgs = images.filter((i) => i.status === 'done');
+  if (doneImgs.length) setActive(doneImgs[0].id);
+  if (ok === targets.length) {
+    setStatus('识别完成：共 ' + ok + ' 张。点击上方缩略图可切换查看/编辑，再分别导出或保存。', 'ok');
+  } else {
+    setStatus('识别完成：' + ok + ' / ' + targets.length + ' 张成功，' + (targets.length - ok) + ' 张失败（可再次点【开始识别】重试）。', 'err');
   }
 });
 
@@ -443,8 +499,12 @@ function toXls() {
 function escapeHtml(s) {
   return String(s).replace(/[&<>]/g, (m) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[m]));
 }
-$('expCsv').addEventListener('click', () => download('拍照成表.csv', '﻿' + toCsv(), 'text/csv;charset=utf-8'));
-$('expXls').addEventListener('click', () => download('拍照成表.xls', toXls(), 'application/vnd.ms-excel'));
+function activeName() {
+  const img = images.find((i) => i.id === activeId);
+  return '拍照成表_' + (img ? img.name.replace(/\.[^.]+$/, '') : '未命名');
+}
+$('expCsv').addEventListener('click', () => download(activeName() + '.csv', '﻿' + toCsv(), 'text/csv;charset=utf-8'));
+$('expXls').addEventListener('click', () => download(activeName() + '.xls', toXls(), 'application/vnd.ms-excel'));
 
 // ---------- 保存到金山文档 ----------
 $('saveKdocs').addEventListener('click', async () => {
@@ -453,7 +513,7 @@ $('saveKdocs').addEventListener('click', async () => {
     const resp = await fetch('/api/save-wps', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ table: tableData, title: '拍照成表-' + new Date().toLocaleString('zh-CN') }),
+      body: JSON.stringify({ table: tableData, title: activeName() + '-' + new Date().toLocaleString('zh-CN') }),
     });
     const data = await resp.json();
     if (data.ok && data.url) {
