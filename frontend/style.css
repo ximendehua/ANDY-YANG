@@ -36,6 +36,7 @@ body {
 }
 .brand { font-size: 19px; font-weight: 700; line-height: 1.2; }
 .sub { font-size: 12px; opacity: .85; margin-top: 2px; }
+.version { font-size: 10px; opacity: .65; margin-left: 6px; font-family: monospace; }
 .container { padding: 12px; max-width: 720px; margin: 0 auto; }
 .card {
   background: var(--card);

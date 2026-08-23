@@ -11,6 +11,9 @@ const { saveToKdocs } = require('./wps');
 const { preprocessForCloud } = require('./image-preprocess');
 const demo = require('./demo-data');
 
+// 每次发布时手动更新，便于前端确认后端版本
+const VERSION = 'ac913c6-20260823-ocrfix-v3';
+
 const ROOT = __dirname;
 const FRONTEND = path.join(ROOT, '..', 'frontend');
 const PORT = process.env.PORT || 3000;
@@ -247,7 +250,10 @@ async function handleSaveWps(req, res) {
 const server = http.createServer((req, res) => {
   const urlPath = req.url.split('?')[0];
   if (req.method === 'GET' && urlPath === '/api/health') {
-    return sendJSON(res, 200, { ok: true, backend: true, hasCreds, hasKdocs: !!cfg.kdocsToken });
+    return sendJSON(res, 200, { ok: true, backend: true, hasCreds, hasKdocs: !!cfg.kdocsToken, version: VERSION });
+  }
+  if (req.method === 'GET' && urlPath === '/api/version') {
+    return sendJSON(res, 200, { ok: true, version: VERSION });
   }
   if (req.method === 'POST' && urlPath === '/api/recognize') return handleRecognize(req, res);
   if (req.method === 'POST' && urlPath === '/api/save-wps') return handleSaveWps(req, res);

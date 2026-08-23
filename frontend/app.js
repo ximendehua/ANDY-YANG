@@ -128,6 +128,10 @@ async function pingBackend() {
     if (!resp.ok) throw new Error('no backend');
     const data = await resp.json();
     backendAvailable = !!(data.ok && data.backend);
+    if (data.version) {
+      const v = $('version');
+      if (v) v.textContent = 'v:' + data.version.slice(0, 12);
+    }
   } catch (e) {
     backendAvailable = false;
   }
