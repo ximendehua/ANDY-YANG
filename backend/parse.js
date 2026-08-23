@@ -317,9 +317,10 @@ function handwritingLooksReliable(parsed) {
 }
 
 // 当手写体 OCR 漏检某个单元格时，用表格 OCR 的单元格内容按坐标兜底填补。
-// 只填补空白格，已有手写体结果的格不会被覆盖；表头行不补（手写体表头已较准）。
+// 改进：不依赖手写体该格是否有 cellBox，而是按手写体已有行列的中心线对齐，
+// 把表格 OCR 的单元格直接映射到对应 (r,c)，从而能补回完全漏检的格子。
 function fillBlanksFromTable(hwParsed, tableResp) {
-  if (!hwParsed || !hwParsed.cellBoxes || !hwParsed.table.length) return;
+  if (!hwParsed || !hwParsed.table.length) return;
   const detections = (tableResp && tableResp.TableDetections) || [];
   let cells = [];
   for (const t of detections) {
@@ -329,43 +330,117 @@ function fillBlanksFromTable(hwParsed, tableResp) {
 
   const table = hwParsed.table;
   const conf = hwParsed.conf;
-  const boxes = hwParsed.cellBoxes;
+  const boxes = hwParsed.cellBoxes || [];
 
+  // 1. 计算手写体表格每行的 y 中心（基于非空 cellBox）
+  const rowCount = table.length;
+  const colCount = table[0] ? table[0].length : 0;
+  const rowCenters = [];
+  for (let r = 0; r < rowCount; r++) {
+    const ys = [];
+    if (boxes[r]) {
+      for (let c = 0; c < colCount; c++) {
+        const b = boxes[r][c];
+        if (b && typeof b.cy === 'number') ys.push(b.cy);
+      }
+    }
+    if (!ys.length) {
+      // 该行所有 cellBox 为空，用上一行 + 平均行高估算
+      const prev = rowCenters[rowCenters.length - 1];
+      const avgGap = computeAvgRowGap(boxes);
+      rowCenters.push(prev != null ? prev + avgGap : null);
+    } else {
+      rowCenters.push(ys.reduce((a, b) => a + b, 0) / ys.length);
+    }
+  }
+
+  // 2. 计算每列的 x 中心（基于非空 cellBox）
+  const colCenters = [];
+  for (let c = 0; c < colCount; c++) {
+    const xs = [];
+    for (let r = 0; r < rowCount; r++) {
+      const b = boxes[r] ? boxes[r][c] : null;
+      if (b && typeof b.cx === 'number') xs.push(b.cx);
+    }
+    if (!xs.length) {
+      const prev = colCenters[colCenters.length - 1];
+      const avgGap = computeAvgColGap(boxes);
+      colCenters.push(prev != null ? prev + avgGap : null);
+    } else {
+      colCenters.push(xs.reduce((a, b) => a + b, 0) / xs.length);
+    }
+  }
+
+  // 3. 计算行列间距用于阈值
+  const rowGap = computeAvgRowGap(boxes) || 20;
+  const colGap = computeAvgColGap(boxes) || 30;
+
+  // 4. 把表格 OCR 的每个非空单元格映射到手写体表格的 (r,c)
   for (const c of cells) {
     const text = (c.Text || '').trim();
     if (!text) continue;
-    const rowIdx = c.RowTl || 0;
-    if (rowIdx === 0) continue; // 表头行不补
-
     const poly = c.Polygon || [];
     if (!poly.length) continue;
     const cx = poly.reduce((s, p) => s + (p.X || 0), 0) / poly.length;
     const cy = poly.reduce((s, p) => s + (p.Y || 0), 0) / poly.length;
 
-    let bestR = -1;
-    let bestC = -1;
-    let bestD = Infinity;
-    for (let r = 0; r < boxes.length; r++) {
-      for (let col = 0; col < boxes[r].length; col++) {
-        const b = boxes[r][col];
-        if (!b) continue;
-        const d = Math.hypot(b.cx - cx, b.cy - cy);
-        if (d < bestD) {
-          bestD = d;
-          bestR = r;
-          bestC = col;
-        }
-      }
+    let bestR = -1, bestRD = Infinity;
+    for (let r = 0; r < rowCount; r++) {
+      if (rowCenters[r] == null) continue;
+      const d = Math.abs(rowCenters[r] - cy);
+      if (d < bestRD) { bestRD = d; bestR = r; }
     }
 
-    // 距离阈值：不超过平均字高的 2.5 倍，避免跨行误填
-    if (bestR >= 0 && bestC >= 0 && bestD < 120) {
-      if (!table[bestR][bestC] || !table[bestR][bestC].trim()) {
-        table[bestR][bestC] = text;
-        conf[bestR][bestC] = typeof c.Confidence === 'number' ? c.Confidence : 70;
-      }
+    let bestC = -1, bestCD = Infinity;
+    for (let col = 0; col < colCount; col++) {
+      if (colCenters[col] == null) continue;
+      const d = Math.abs(colCenters[col] - cx);
+      if (d < bestCD) { bestCD = d; bestC = col; }
+    }
+
+    // 表头行不补；距离超过 2 倍行列间距视为跨行/列误匹配
+    if (bestR === 0 || bestR < 0 || bestC < 0) continue;
+    if (bestRD > rowGap * 2 || bestCD > colGap * 2) continue;
+
+    if (!table[bestR][bestC] || !table[bestR][bestC].trim()) {
+      table[bestR][bestC] = text;
+      conf[bestR][bestC] = typeof c.Confidence === 'number' ? c.Confidence : 70;
     }
   }
+}
+
+function computeAvgRowGap(boxes) {
+  if (!boxes || !boxes.length) return 0;
+  const centers = [];
+  for (const row of boxes) {
+    const ys = (row || []).filter((b) => b && typeof b.cy === 'number').map((b) => b.cy);
+    if (ys.length) centers.push(ys.reduce((a, b) => a + b, 0) / ys.length);
+  }
+  if (centers.length < 2) return 0;
+  const gaps = [];
+  for (let i = 1; i < centers.length; i++) gaps.push(centers[i] - centers[i - 1]);
+  gaps.sort((a, b) => a - b);
+  return gaps[Math.floor(gaps.length / 2)] || 0;
+}
+
+function computeAvgColGap(boxes) {
+  if (!boxes || !boxes.length) return 0;
+  const colCount = boxes[0] ? boxes[0].length : 0;
+  if (!colCount) return 0;
+  const centers = [];
+  for (let c = 0; c < colCount; c++) {
+    const xs = [];
+    for (const row of boxes) {
+      const b = row ? row[c] : null;
+      if (b && typeof b.cx === 'number') xs.push(b.cx);
+    }
+    if (xs.length) centers.push(xs.reduce((a, b) => a + b, 0) / xs.length);
+  }
+  if (centers.length < 2) return 0;
+  const gaps = [];
+  for (let i = 1; i < centers.length; i++) gaps.push(centers[i] - centers[i - 1]);
+  gaps.sort((a, b) => a - b);
+  return gaps[Math.floor(gaps.length / 2)] || 0;
 }
 
 // 手写体 OCR 偶尔会漏检首位数字（如把 "19195" 识别成 "9195"）。

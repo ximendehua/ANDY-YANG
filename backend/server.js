@@ -6,13 +6,13 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const { recognizeTable, recognizeHandwriting } = require('./tencent-ocr');
-const { parseTableResult, parseHandwritingResult, mergeTableAndHandwriting, handwritingLooksReliable, fillBlanksFromTable, fixLeadingDigitDrop, fixColumnDigitLength } = require('./parse');
+const { parseTableResult, parseHandwritingResult, mergeTableAndHandwriting, fillBlanksFromTable, fixLeadingDigitDrop, fixColumnDigitLength } = require('./parse');
 const { saveToKdocs } = require('./wps');
 const { preprocessForCloud } = require('./image-preprocess');
 const demo = require('./demo-data');
 
 // 每次发布时手动更新，便于前端确认后端版本
-const VERSION = 'ac913c6-20260823-ocrfix-v3';
+const VERSION = 'ac913c6-20260823-ocrfix-v4';
 
 const ROOT = __dirname;
 const FRONTEND = path.join(ROOT, '..', 'frontend');
@@ -164,7 +164,7 @@ async function handleRecognize(req, res) {
     }
 
     // mode === 'auto'：优先选手写体 OCR 聚类结果（修复后发现手写编号表结构更准确），
-    // 若手写体 OCR 不可靠，再回退到表格 OCR / 融合方案。
+    // 再用表格 OCR 兜底填补漏检/空白格，最后做列级长度修正。
     let tableResp = null;
     let hwResp = null;
     try {
@@ -178,17 +178,15 @@ async function handleRecognize(req, res) {
       console.log('[info] 手写体识别失败:', e.message);
     }
 
+    // 优先：手写体 OCR 聚类 + 规范化
     if (hwResp) {
       const hwParsed = parseHandwritingResult(hwResp);
-      if (handwritingLooksReliable(hwParsed)) {
-        // 手写体 OCR 对单个淡字/小字可能漏检，用表格 OCR 的坐标对齐结果填补空白格。
-        // 同时修正漏检首位数字的情况（如 19195 → 9195）。
-        if (tableResp && hwParsed.cellBoxes) {
+      if (hwParsed.table.length && hwParsed.table[0].length) {
+        if (tableResp) {
           fillBlanksFromTable(hwParsed, tableResp);
           fixLeadingDigitDrop(hwParsed, tableResp);
-          fixColumnDigitLength(hwParsed);
         }
-        // cellBoxes 是内部坐标，不返回给前端
+        fixColumnDigitLength(hwParsed);
         const { cellBoxes, ...out } = hwParsed;
         return sendJSON(res, 200, { ok: true, demo: false, mode: 'auto', ...out });
       }
